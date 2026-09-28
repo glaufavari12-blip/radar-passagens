@@ -1,24 +1,16 @@
 """
-✈️ Radar de Passagens — Agente Autônomo
-Roda a cada hora, busca promoções via Claude AI e notifica via Telegram.
+✈️ Radar de Passagens — Agente Autônomo com Gemini
 """
-
-import os
-import json
-import time
-import logging
-import hashlib
-import asyncio
+import os, json, time, logging, hashlib, asyncio
 from datetime import datetime
 import httpx
 
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-TELEGRAM_TOKEN    = os.environ.get("TELEGRAM_TOKEN",   "8903489815:AAH0NbYkjAhwQIR1YtHXqkiMI7DkoE21NkI")
-TELEGRAM_CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "7006954851")
-
+GEMINI_API_KEY   = os.environ["GEMINI_API_KEY"]
+TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN",   "8903489815:AAH0NbYkjAhwQIR1YtHXqkiMI7DkoE21NkI")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "7006954851")
 INTERVALO_HORAS  = float(os.environ.get("INTERVALO_HORAS", "1"))
-PRECO_MAX_INTER  = int(os.environ.get("PRECO_MAX_INTER",  "4000"))
-PRECO_MAX_NAC    = int(os.environ.get("PRECO_MAX_NAC",    "800"))
+PRECO_MAX_INTER  = int(os.environ.get("PRECO_MAX_INTER", "4000"))
+PRECO_MAX_NAC    = int(os.environ.get("PRECO_MAX_NAC",   "800"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 log = logging.getLogger("radar")
@@ -31,42 +23,42 @@ def hash_oferta(voo: dict) -> str:
 
 PROMPT_INTER = f"""Você é um agente especialista em passagens aéreas promocionais.
 Simule uma busca realista de voos internacionais São Paulo → Europa para a data atual.
-REGRAS:
-- Origem: GRU (Guarulhos) ou CGH (Congonhas)
-- Destino: Europa, ida e volta para GRU/CGH
-- Duração: entre 15 e 20 dias
-- Limite: R$ {PRECO_MAX_INTER} por pessoa ida+volta
-DESTINOS PRIORITÁRIOS: Portugal (LIS/OPO), França (CDG), Holanda (AMS), Escócia (EDI/GLA), Espanha (MAD/BCN)
-Companhias preferidas: TAP, Air France, KLM, Iberia, LATAM, British Airways, Lufthansa.
-Gere entre 4 e 6 opções realistas.
+- Origem: GRU ou CGH
+- Destino: Europa, ida e volta
+- Duração: 15 a 20 dias
+- Limite: R$ {PRECO_MAX_INTER} por pessoa
+- Destinos prioritários: Portugal (LIS/OPO), França (CDG), Holanda (AMS), Escócia (EDI), Espanha (MAD/BCN)
+- Companhias: TAP, Air France, KLM, Iberia, LATAM, British Airways, Lufthansa
+- Gere entre 4 e 6 opções realistas
+
 Responda SOMENTE JSON válido, sem markdown:
-{{"voos": [{{"tipo": "internacional","destino_cidade": "string","destino_pais": "string","pais_emoji": "string","destino_iata": "string","origem_iata": "string","companhia": "string","data_ida": "string","data_volta": "string","duracao_dias": 0,"escalas_ida": 0,"escalas_volta": 0,"cidades_escala": null,"preco_total": 0,"dentro_limite": true,"vale_muito": true,"motivo": "string","link_busca": "string"}}]}}"""
+{{"voos": [{{"tipo": "internacional", "destino_cidade": "string", "destino_pais": "string", "pais_emoji": "string", "destino_iata": "string", "origem_iata": "string", "companhia": "string", "data_ida": "DD/MM/YYYY", "data_volta": "DD/MM/YYYY", "duracao_dias": 0, "escalas_ida": 0, "escalas_volta": 0, "cidades_escala": null, "preco_total": 0, "dentro_limite": true, "vale_muito": true, "motivo": "string", "link_busca": "string"}}]}}"""
 
 PROMPT_NACIONAL = f"""Você é um agente especialista em passagens aéreas nacionais promocionais.
 Simule uma busca realista de voos nacionais São Paulo → Nordeste para a data atual.
-REGRAS:
 - Origem: GRU ou CGH
-- Destino: Nordeste, ida e volta, duração 7 a 15 dias
-- Limite: R$ {PRECO_MAX_NAC} por pessoa ida+volta
-- Destinos: FOR, REC, SSA, NAT, MCZ — Companhias: LATAM, Gol, Azul
-Gere entre 3 e 5 opções realistas.
-Responda SOMENTE JSON válido, sem markdown:
-{{"voos": [{{"tipo": "nacional","destino_cidade": "string","destino_estado": "string","pais_emoji": "🇧🇷","destino_iata": "string","origem_iata": "string","companhia": "string","data_ida": "string","data_volta": "string","duracao_dias": 0,"escalas_ida": 0,"escalas_volta": 0,"preco_total": 0,"dentro_limite": true,"vale_muito": true,"motivo": "string","link_busca": "string"}}]}}"""
+- Destino: Nordeste, ida e volta
+- Duração: 7 a 15 dias
+- Limite: R$ {PRECO_MAX_NAC} por pessoa
+- Destinos: FOR, REC, SSA, NAT, MCZ, JPA
+- Companhias: LATAM, Gol, Azul
+- Gere entre 3 e 5 opções realistas
 
-async def buscar_voos(client: httpx.AsyncClient, system_prompt: str, tipo: str) -> list[dict]:
+Responda SOMENTE JSON válido, sem markdown:
+{{"voos": [{{"tipo": "nacional", "destino_cidade": "string", "destino_estado": "string", "pais_emoji": "🇧🇷", "destino_iata": "string", "origem_iata": "string", "companhia": "string", "data_ida": "DD/MM/YYYY", "data_volta": "DD/MM/YYYY", "duracao_dias": 0, "escalas_ida": 0, "escalas_volta": 0, "preco_total": 0, "dentro_limite": true, "vale_muito": true, "motivo": "string", "link_busca": "string"}}]}}"""
+
+async def buscar_voos(client: httpx.AsyncClient, prompt: str, tipo: str) -> list[dict]:
     log.info(f"🔍 Buscando voos {tipo}...")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     try:
-        resp = await client.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-            json={"model": "claude-sonnet-4-20250514", "max_tokens": 1000, "system": system_prompt, "messages": [{"role": "user", "content": f"Busque promoções agora. Data: {datetime.now().strftime('%d/%m/%Y %H:%M')}"}]},
-            timeout=60.0
-        )
+        resp = await client.post(url, json={
+            "contents": [{"parts": [{"text": prompt + f"\n\nData atual: {datetime.now().strftime('%d/%m/%Y %H:%M')}"}]}],
+            "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2000}
+        }, timeout=60.0)
         resp.raise_for_status()
-        data = resp.json()
-        text = "".join(b.get("text", "") for b in data.get("content", []))
-        parsed = json.loads(text.replace("```json", "").replace("```", "").strip())
-        voos = parsed.get("voos", [])
+        text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+        text = text.replace("```json", "").replace("```", "").strip()
+        voos = json.loads(text).get("voos", [])
         log.info(f"✅ {len(voos)} voos {tipo} encontrados")
         return voos
     except Exception as e:
@@ -74,10 +66,12 @@ async def buscar_voos(client: httpx.AsyncClient, system_prompt: str, tipo: str) 
         return []
 
 async def enviar_telegram(client: httpx.AsyncClient, texto: str):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        resp = await client.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": texto, "parse_mode": "HTML", "disable_web_page_preview": True},
-            timeout=15.0)
+        resp = await client.post(url, json={
+            "chat_id": TELEGRAM_CHAT_ID, "text": texto,
+            "parse_mode": "HTML", "disable_web_page_preview": True
+        }, timeout=15.0)
         resp.raise_for_status()
         log.info("📨 Mensagem enviada ao Telegram")
     except Exception as e:
@@ -91,10 +85,14 @@ def formatar_mensagem(voo: dict, limite: int) -> str:
     preco = voo.get("preco_total", 0)
     ok = preco <= limite
     top = voo.get("vale_muito", False)
+    emoji = voo.get("pais_emoji", "🌍")
+    cidade = voo.get("destino_cidade", "?")
+    pais = voo.get("destino_pais") or voo.get("destino_estado", "")
+    status = "✅ DENTRO DO LIMITE" if ok else "⚠️ ACIMA DO LIMITE"
     destaque = "\n⚡ <b>TOP DEAL — Não perca!</b>" if top else ""
     return (
         f"✈️ <b>PROMOÇÃO ENCONTRADA!{destaque}</b>\n\n"
-        f"{voo.get('pais_emoji','🌍')} <b>Destino:</b> {voo.get('destino_cidade','?')}, {voo.get('destino_pais') or voo.get('destino_estado','')}\n"
+        f"{emoji} <b>Destino:</b> {cidade}, {pais}\n"
         f"🛫 <b>Rota:</b> {voo.get('origem_iata','?')} → {voo.get('destino_iata','?')}\n"
         f"📅 <b>Ida:</b> {voo.get('data_ida','?')}\n"
         f"📅 <b>Volta:</b> {voo.get('data_volta','?')}\n"
@@ -102,7 +100,7 @@ def formatar_mensagem(voo: dict, limite: int) -> str:
         f"🏢 <b>Companhia:</b> {voo.get('companhia','?')}\n"
         f"🔄 <b>Escalas:</b> {escala_txt}\n"
         f"💰 <b>Preço:</b> R$ {preco:,.0f} por pessoa\n"
-        f"📊 <b>Status:</b> {'✅ DENTRO DO LIMITE' if ok else '⚠️ ACIMA DO LIMITE'}\n"
+        f"📊 <b>Status:</b> {status}\n"
         f"💡 <b>Vale a pena?</b> {voo.get('motivo','')}\n\n"
         f"🔍 <a href=\"{voo.get('link_busca','')}\">Buscar no Google Flights</a>"
     )
@@ -134,9 +132,14 @@ async def ciclo_busca():
                     ofertas_notificadas.add(hk)
                     novas += 1
                     await asyncio.sleep(1.5)
-            log.info(f"🎉 {novas} oferta(s) notificada(s)!" if novas else "😴 Nenhuma oferta nova.")
+            if novas == 0:
+                log.info("😴 Nenhuma oferta nova neste ciclo.")
+            else:
+                log.info(f"🎉 {novas} oferta(s) notificada(s)!")
             if len(ofertas_notificadas) > 500:
                 ofertas_notificadas.clear()
+            prox = datetime.fromtimestamp(time.time() + INTERVALO_HORAS * 3600)
+            log.info(f"💤 Próxima busca às {prox.strftime('%H:%M')}")
             await asyncio.sleep(INTERVALO_HORAS * 3600)
 
 if __name__ == "__main__":
