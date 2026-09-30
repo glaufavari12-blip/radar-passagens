@@ -1,147 +1,165 @@
 """
-✈️ Radar de Passagens — Agente Autônomo com Gemini
+✈️ Radar de Passagens — Agente Autônomo com Groq
 """
 import os, json, time, logging, hashlib, asyncio
 from datetime import datetime
 import httpx
 
-GEMINI_API_KEY   = os.environ["GEMINI_API_KEY"]
-TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN",   "8903489815:AAH0NbYkjAhwQIR1YtHXqkiMI7DkoE21NkI")
+GROQ_API_KEY     = os.environ["GROQ_API_KEY"]
+TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN",   "8903489815:AAHoNbYkjAhwQIR1YtHXqkiMI7DkoE21NkI")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "7006954851")
 INTERVALO_HORAS  = float(os.environ.get("INTERVALO_HORAS", "1"))
-PRECO_MAX_INTER  = int(os.environ.get("PRECO_MAX_INTER", "4000"))
+PRECO_MAX_INTER  = int(os.environ.get("PRECO_MAX_INTER", "3000"))
 PRECO_MAX_NAC    = int(os.environ.get("PRECO_MAX_NAC",   "800"))
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-log = logging.getLogger("radar")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+log = logging.getLogger(__name__)
 
-ofertas_notificadas: set[str] = set()
+NOTIFICADOS = set()
 
-def hash_oferta(voo: dict) -> str:
-    chave = f"{voo.get('origem_iata')}-{voo.get('destino_iata')}-{voo.get('data_ida')}-{voo.get('data_volta')}-{voo.get('preco_total')}"
+BUSCAS_INTER = [
+    {"origem": "GRU", "destino": "LIS", "cidade": "Lisboa"},
+    {"origem": "GRU", "destino": "MAD", "cidade": "Madrid"},
+    {"origem": "GRU", "destino": "CDG", "cidade": "Paris"},
+    {"origem": "GRU", "destino": "AMS", "cidade": "Amsterdam"},
+    {"origem": "GRU", "destino": "FCO", "cidade": "Roma"},
+    {"origem": "GRU", "destino": "ATH", "cidade": "Atenas"},
+    {"origem": "CGH", "destino": "LIS", "cidade": "Lisboa"},
+]
+
+BUSCAS_NAC = [
+    {"origem": "GRU", "destino": "REC", "cidade": "Recife"},
+    {"origem": "GRU", "destino": "FOR", "cidade": "Fortaleza"},
+    {"origem": "GRU", "destino": "SSA", "cidade": "Salvador"},
+    {"origem": "CGH", "destino": "REC", "cidade": "Recife"},
+]
+
+async def chamar_groq(prompt: str) -> str:
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    body = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.7,
+        "max_tokens": 1024,
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post("https://api.groq.com/openai/v1/chat/completions",
+                              headers=headers, json=body)
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"]
+
+async def enviar_telegram(msg: str):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    async with httpx.AsyncClient(timeout=15) as client:
+        await client.post(url, json={"chat_id": TELEGRAM_CHAT_ID,
+                                      "text": msg, "parse_mode": "HTML"})
+
+def hash_voo(info: dict) -> str:
+    chave = f"{info.get('destino')}{info.get('datas')}{info.get('preco')}"
     return hashlib.md5(chave.encode()).hexdigest()
 
-PROMPT_INTER = f"""Você é um agente especialista em passagens aéreas promocionais.
-Simule uma busca realista de voos internacionais São Paulo → Europa para a data atual.
-- Origem: GRU ou CGH
-- Destino: Europa, ida e volta
-- Duração: 15 a 20 dias
-- Limite: R$ {PRECO_MAX_INTER} por pessoa
-- Destinos prioritários: Portugal (LIS/OPO), França (CDG), Holanda (AMS), Escócia (EDI), Espanha (MAD/BCN)
-- Companhias: TAP, Air France, KLM, Iberia, LATAM, British Airways, Lufthansa
-- Gere entre 4 e 6 opções realistas
+async def buscar_voo_ia(busca: dict, tipo: str) -> dict | None:
+    preco_max = PRECO_MAX_INTER if tipo == "inter" else PRECO_MAX_NAC
+    duracao = "entre 10 e 20 dias" if tipo == "inter" else "entre 3 e 7 dias"
+    hoje = datetime.now().strftime("%Y-%m-%d")
 
-Responda SOMENTE JSON válido, sem markdown:
-{{"voos": [{{"tipo": "internacional", "destino_cidade": "string", "destino_pais": "string", "pais_emoji": "string", "destino_iata": "string", "origem_iata": "string", "companhia": "string", "data_ida": "DD/MM/YYYY", "data_volta": "DD/MM/YYYY", "duracao_dias": 0, "escalas_ida": 0, "escalas_volta": 0, "cidades_escala": null, "preco_total": 0, "dentro_limite": true, "vale_muito": true, "motivo": "string", "link_busca": "string"}}]}}"""
+    prompt = f"""Você é um especialista em passagens aéreas promocionais. 
+Simule uma busca realista de voos com os seguintes parâmetros:
+- Data de hoje: {hoje}
+- Origem: {busca['origem']} → Destino: {busca['destino']} ({busca['cidade']})
+- Tipo: ida e volta
+- Duração da viagem: {duracao}
+- Preço máximo: R$ {preco_max} por pessoa
+- Meses preferidos: temporada baixa (março-junho, setembro-novembro)
 
-PROMPT_NACIONAL = f"""Você é um agente especialista em passagens aéreas nacionais promocionais.
-Simule uma busca realista de voos nacionais São Paulo → Nordeste para a data atual.
-- Origem: GRU ou CGH
-- Destino: Nordeste, ida e volta
-- Duração: 7 a 15 dias
-- Limite: R$ {PRECO_MAX_NAC} por pessoa
-- Destinos: FOR, REC, SSA, NAT, MCZ, JPA
-- Companhias: LATAM, Gol, Azul
-- Gere entre 3 e 5 opções realistas
+Responda APENAS com um JSON válido (sem markdown, sem explicações):
+{{
+  "encontrou": true/false,
+  "destino": "cidade, país",
+  "companhia": "nome da companhia",
+  "datas": "DD/MM/AAAA a DD/MM/AAAA",
+  "duracao_dias": numero,
+  "escalas": numero,
+  "preco": numero,
+  "vale_pena": "Sim, muito!" / "Vale a pena" / "Razoável",
+  "link": "https://www.google.com/travel/flights"
+}}
 
-Responda SOMENTE JSON válido, sem markdown:
-{{"voos": [{{"tipo": "nacional", "destino_cidade": "string", "destino_estado": "string", "pais_emoji": "🇧🇷", "destino_iata": "string", "origem_iata": "string", "companhia": "string", "data_ida": "DD/MM/YYYY", "data_volta": "DD/MM/YYYY", "duracao_dias": 0, "escalas_ida": 0, "escalas_volta": 0, "preco_total": 0, "dentro_limite": true, "vale_muito": true, "motivo": "string", "link_busca": "string"}}]}}"""
+Se não encontrar promoção abaixo de R$ {preco_max}, retorne {{"encontrou": false}}"""
 
-async def buscar_voos(client: httpx.AsyncClient, prompt: str, tipo: str) -> list[dict]:
-    log.info(f"🔍 Buscando voos {tipo}...")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     try:
-        resp = await client.post(url, json={
-            "contents": [{"parts": [{"text": prompt + f"\n\nData atual: {datetime.now().strftime('%d/%m/%Y %H:%M')}"}]}],
-            "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2000}
-        }, timeout=60.0)
-        resp.raise_for_status()
-        text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-        text = text.replace("```json", "").replace("```", "").strip()
-        voos = json.loads(text).get("voos", [])
-        log.info(f"✅ {len(voos)} voos {tipo} encontrados")
-        return voos
+        resposta = await chamar_groq(prompt)
+        resposta = resposta.strip()
+        if resposta.startswith("```"):
+            resposta = resposta.split("```")[1]
+            if resposta.startswith("json"):
+                resposta = resposta[4:]
+        dados = json.loads(resposta)
+        if dados.get("encontrou") and dados.get("preco", 9999) <= preco_max:
+            return dados
     except Exception as e:
-        log.error(f"❌ Erro buscando {tipo}: {e}")
-        return []
-
-async def enviar_telegram(client: httpx.AsyncClient, texto: str):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    try:
-        resp = await client.post(url, json={
-            "chat_id": TELEGRAM_CHAT_ID, "text": texto,
-            "parse_mode": "HTML", "disable_web_page_preview": True
-        }, timeout=15.0)
-        resp.raise_for_status()
-        log.info("📨 Mensagem enviada ao Telegram")
-    except Exception as e:
-        log.error(f"❌ Erro Telegram: {e}")
-
-def formatar_mensagem(voo: dict, limite: int) -> str:
-    escalas = (voo.get("escalas_ida") or 0) + (voo.get("escalas_volta") or 0)
-    escala_txt = "Direto ✈️" if escalas == 0 else f"{escalas} escala(s)"
-    if voo.get("cidades_escala"):
-        escala_txt += f" via {voo['cidades_escala']}"
-    preco = voo.get("preco_total", 0)
-    ok = preco <= limite
-    top = voo.get("vale_muito", False)
-    emoji = voo.get("pais_emoji", "🌍")
-    cidade = voo.get("destino_cidade", "?")
-    pais = voo.get("destino_pais") or voo.get("destino_estado", "")
-    status = "✅ DENTRO DO LIMITE" if ok else "⚠️ ACIMA DO LIMITE"
-    destaque = "\n⚡ <b>TOP DEAL — Não perca!</b>" if top else ""
-    return (
-        f"✈️ <b>PROMOÇÃO ENCONTRADA!{destaque}</b>\n\n"
-        f"{emoji} <b>Destino:</b> {cidade}, {pais}\n"
-        f"🛫 <b>Rota:</b> {voo.get('origem_iata','?')} → {voo.get('destino_iata','?')}\n"
-        f"📅 <b>Ida:</b> {voo.get('data_ida','?')}\n"
-        f"📅 <b>Volta:</b> {voo.get('data_volta','?')}\n"
-        f"🗓 <b>Duração:</b> {voo.get('duracao_dias','?')} dias\n"
-        f"🏢 <b>Companhia:</b> {voo.get('companhia','?')}\n"
-        f"🔄 <b>Escalas:</b> {escala_txt}\n"
-        f"💰 <b>Preço:</b> R$ {preco:,.0f} por pessoa\n"
-        f"📊 <b>Status:</b> {status}\n"
-        f"💡 <b>Vale a pena?</b> {voo.get('motivo','')}\n\n"
-        f"🔍 <a href=\"{voo.get('link_busca','')}\">Buscar no Google Flights</a>"
-    )
+        log.warning(f"Erro ao processar busca {busca['destino']}: {e}")
+    return None
 
 async def ciclo_busca():
-    async with httpx.AsyncClient() as client:
-        await enviar_telegram(client,
-            "🤖 <b>Olá, Glau! Radar de Passagens ATIVO! ✈️</b>\n\n"
-            f"🔁 Buscando a cada <b>{int(INTERVALO_HORAS)}h</b>\n"
-            f"🌍 Europa (GRU/CGH): até R$ {PRECO_MAX_INTER:,}\n"
-            f"🇧🇷 Nordeste (GRU/CGH): até R$ {PRECO_MAX_NAC:,}\n\n"
-            "Você será avisada quando encontrar promoções! 🎯"
-        )
-        while True:
-            log.info(f"⏰ Ciclo iniciado — {datetime.now().strftime('%d/%m/%Y %H:%M')}")
-            inter_voos, nac_voos = await asyncio.gather(
-                buscar_voos(client, PROMPT_INTER, "internacional"),
-                buscar_voos(client, PROMPT_NACIONAL, "nacional")
-            )
-            novas = 0
-            for voos, limite in [(inter_voos, PRECO_MAX_INTER), (nac_voos, PRECO_MAX_NAC)]:
-                for voo in voos:
-                    if not voo.get("dentro_limite") and not voo.get("vale_muito"):
-                        continue
-                    hk = hash_oferta(voo)
-                    if hk in ofertas_notificadas:
-                        continue
-                    await enviar_telegram(client, formatar_mensagem(voo, limite))
-                    ofertas_notificadas.add(hk)
-                    novas += 1
-                    await asyncio.sleep(1.5)
-            if novas == 0:
-                log.info("😴 Nenhuma oferta nova neste ciclo.")
-            else:
-                log.info(f"🎉 {novas} oferta(s) notificada(s)!")
-            if len(ofertas_notificadas) > 500:
-                ofertas_notificadas.clear()
-            prox = datetime.fromtimestamp(time.time() + INTERVALO_HORAS * 3600)
-            log.info(f"💤 Próxima busca às {prox.strftime('%H:%M')}")
-            await asyncio.sleep(INTERVALO_HORAS * 3600)
+    log.info("🔍 Iniciando ciclo de busca...")
+    encontrados = 0
+
+    for busca in BUSCAS_INTER:
+        voo = await buscar_voo_ia(busca, "inter")
+        if voo:
+            h = hash_voo(voo)
+            if h not in NOTIFICADOS:
+                NOTIFICADOS.add(h)
+                msg = (
+                    f"✈️ <b>Promoção Internacional!</b>\n\n"
+                    f"🌍 <b>Destino:</b> {voo['destino']}\n"
+                    f"📅 <b>Datas:</b> {voo['datas']}\n"
+                    f"⏱ <b>Duração:</b> {voo['duracao_dias']} dias\n"
+                    f"🏢 <b>Companhia:</b> {voo['companhia']}\n"
+                    f"🔁 <b>Escalas:</b> {voo['escalas']}\n"
+                    f"💰 <b>Preço:</b> R$ {voo['preco']:,.0f}\n"
+                    f"⭐ <b>Vale a pena?</b> {voo['vale_pena']}\n"
+                    f"🔗 <b>Link:</b> {voo['link']}"
+                )
+                await enviar_telegram(msg)
+                encontrados += 1
+                log.info(f"✅ Notificado: {voo['destino']} R${voo['preco']}")
+        await asyncio.sleep(2)
+
+    for busca in BUSCAS_NAC:
+        voo = await buscar_voo_ia(busca, "nac")
+        if voo:
+            h = hash_voo(voo)
+            if h not in NOTIFICADOS:
+                NOTIFICADOS.add(h)
+                msg = (
+                    f"✈️ <b>Promoção Nacional!</b>\n\n"
+                    f"🇧🇷 <b>Destino:</b> {voo['destino']}\n"
+                    f"📅 <b>Datas:</b> {voo['datas']}\n"
+                    f"⏱ <b>Duração:</b> {voo['duracao_dias']} dias\n"
+                    f"🏢 <b>Companhia:</b> {voo['companhia']}\n"
+                    f"🔁 <b>Escalas:</b> {voo['escalas']}\n"
+                    f"💰 <b>Preço:</b> R$ {voo['preco']:,.0f}\n"
+                    f"⭐ <b>Vale a pena?</b> {voo['vale_pena']}\n"
+                    f"🔗 <b>Link:</b> {voo['link']}"
+                )
+                await enviar_telegram(msg)
+                encontrados += 1
+        await asyncio.sleep(2)
+
+    log.info(f"✅ Ciclo concluído. {encontrados} promoções enviadas.")
+
+async def main():
+    await enviar_telegram("🤖 <b>Radar de Passagens iniciado!</b>\nVou buscar promoções a cada hora. ✈️")
+    log.info("🚀 Agente iniciado!")
+    while True:
+        await ciclo_busca()
+        log.info(f"⏳ Aguardando {INTERVALO_HORAS}h para próxima busca...")
+        await asyncio.sleep(INTERVALO_HORAS * 3600)
 
 if __name__ == "__main__":
-    log.info("✈️  Radar de Passagens iniciando...")
-    asyncio.run(ciclo_busca())
+    asyncio.run(main())
