@@ -24,7 +24,15 @@ BUSCAS_INTER = [
     {"origem": "GRU", "destino": "AMS", "cidade": "Amsterdam"},
     {"origem": "GRU", "destino": "FCO", "cidade": "Roma"},
     {"origem": "GRU", "destino": "ATH", "cidade": "Atenas"},
+    {"origem": "GRU", "destino": "DBV", "cidade": "Dubrovnik (Croácia)"},
+    {"origem": "GRU", "destino": "ZAG", "cidade": "Zagreb (Croácia)"},
+    {"origem": "GRU", "destino": "EDI", "cidade": "Edimburgo (Escócia)"},
+    {"origem": "GRU", "destino": "TIA", "cidade": "Tirana (Albânia)"},
     {"origem": "CGH", "destino": "LIS", "cidade": "Lisboa"},
+    {"origem": "CGH", "destino": "CDG", "cidade": "Paris"},
+    {"origem": "CGH", "destino": "MAD", "cidade": "Madrid"},
+    {"origem": "VCP", "destino": "LIS", "cidade": "Lisboa"},
+    {"origem": "VCP", "destino": "MAD", "cidade": "Madrid"},
 ]
 
 BUSCAS_NAC = [
@@ -32,6 +40,9 @@ BUSCAS_NAC = [
     {"origem": "GRU", "destino": "FOR", "cidade": "Fortaleza"},
     {"origem": "GRU", "destino": "SSA", "cidade": "Salvador"},
     {"origem": "CGH", "destino": "REC", "cidade": "Recife"},
+    {"origem": "CGH", "destino": "FOR", "cidade": "Fortaleza"},
+    {"origem": "VCP", "destino": "REC", "cidade": "Recife"},
+    {"origem": "VCP", "destino": "FOR", "cidade": "Fortaleza"},
 ]
 
 async def chamar_groq(prompt: str) -> str:
